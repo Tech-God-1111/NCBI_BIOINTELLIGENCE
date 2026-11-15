@@ -1,0 +1,11 @@
+[project]
+name = "ncbi-biointelligence"
+version = "0.1.0"
+description = "Integrated NCBI-powered bioinformatics research workstation"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
