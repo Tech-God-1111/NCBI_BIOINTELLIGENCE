@@ -33,31 +33,41 @@ async def fetch_rcsb_mmcif(pdb_id: str, timeout_seconds: float = 30.0) -> dict[s
     """Fetch an existing mmCIF coordinate file from the public RCSB archive."""
     normalized = normalize_pdb_id(pdb_id)
     url = RCSB_CIF_URL.format(pdb_id=normalized)
+    content_buffer = bytearray()
 
     try:
         async with httpx.AsyncClient(timeout=timeout_seconds, follow_redirects=True) as client:
-            response = await client.get(url)
-            if response.status_code == 404:
-                raise StructureNotFound(f"No RCSB PDB archive entry was found for {normalized}.")
-            response.raise_for_status()
-    except StructureNotFound:
+            async with client.stream("GET", url) as response:
+                if response.status_code == 404:
+                    raise StructureNotFound(f"No RCSB PDB archive entry was found for {normalized}.")
+                response.raise_for_status()
+
+                declared_size = response.headers.get("content-length")
+                if declared_size and declared_size.isdigit() and int(declared_size) > MAX_STRUCTURE_BYTES:
+                    raise StructureProviderError(
+                        f"The structure file exceeds the current {MAX_STRUCTURE_BYTES // (1024 * 1024)} MB retrieval limit."
+                    )
+
+                async for chunk in response.aiter_bytes():
+                    content_buffer.extend(chunk)
+                    if len(content_buffer) > MAX_STRUCTURE_BYTES:
+                        raise StructureProviderError(
+                            f"The structure file exceeds the current {MAX_STRUCTURE_BYTES // (1024 * 1024)} MB retrieval limit."
+                        )
+    except (StructureNotFound, StructureProviderError):
         raise
     except httpx.HTTPError as exc:
         raise StructureProviderError(f"RCSB structure retrieval failed: {exc}") from exc
 
-    content = response.content
-    if len(content) > MAX_STRUCTURE_BYTES:
-        raise StructureProviderError(
-            f"The structure file exceeds the current {MAX_STRUCTURE_BYTES // (1024 * 1024)} MB retrieval limit."
-        )
-
     try:
-        mmcif_text = content.decode("utf-8")
+        mmcif_text = bytes(content_buffer).decode("utf-8")
     except UnicodeDecodeError as exc:
         raise StructureProviderError("RCSB returned a structure file that is not valid UTF-8 text.") from exc
 
     if "_atom_site." not in mmcif_text or not mmcif_text.lstrip().startswith("data_"):
-        raise StructureProviderError("The downloaded file does not appear to contain a coordinate-bearing mmCIF structure.")
+        raise StructureProviderError(
+            "The downloaded file does not appear to contain a coordinate-bearing mmCIF structure."
+        )
 
     return {
         "pdb_id": normalized,
